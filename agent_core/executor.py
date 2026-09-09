@@ -31,11 +31,11 @@ class ExecutionResult:
 
 
 class AgentExecutor:
-    def __init__(self, model: Any, workspace: Path, max_steps: int = 32, max_recovery: int = 6, max_command_seconds: int = 600, temperature: float = 0.1, emit: Callable[[str, dict[str, Any]], None] | None = None, state_dir: Path | None = None, auto_git_checkpoint: bool = True, git_remote: str = "origin", checkpoint_branch: str = "agent-checkpoints", checkpoint_every_tool: bool = True, max_context_chars: int = 12000) -> None:
+    def __init__(self, model: Any, workspace: Path, max_steps: int = 32, max_recovery: int = 6, max_command_seconds: int = 600, temperature: float = 0.1, emit: Callable[[str, dict[str, Any]], None] | None = None, state_dir: Path | None = None, auto_git_checkpoint: bool = True, git_remote: str = "origin", checkpoint_branch: str = "agent-checkpoints", checkpoint_every_tool: bool = True, max_context_chars: int = 12000, max_output_chars: int = 16000) -> None:
         self.model = model
         self.workspace = workspace.resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
-        self.tools = WorkspaceTools(self.workspace, max_command_seconds=max_command_seconds)
+        self.tools = WorkspaceTools(self.workspace, max_command_seconds=max_command_seconds, max_output_chars=max_output_chars)
         self.max_steps = max(1, min(int(max_steps), 128))
         self.max_recovery = max(0, min(int(max_recovery), 12))
         self.temperature = max(0.0, min(float(temperature), 1.0))
@@ -56,7 +56,6 @@ class AgentExecutor:
             return messages
         if len(messages) <= 2:
             return [{**messages[0], "content": str(messages[0].get("content", ""))[: self.max_context_chars]}]
-
         base = messages[:2]
         selected: list[dict[str, Any]] = []
         used = encoded(base)
@@ -110,10 +109,8 @@ class AgentExecutor:
 
     def _run_loop(self, execution_id: str, task: str, messages: list[dict[str, Any]], history: list[dict[str, Any]], start_step: int, recovery: int) -> ExecutionResult:
         current_step = start_step
-
         def on_interrupt(signum: int) -> None:
             self._interrupt(execution_id, task, messages, history, current_step, recovery, signum)
-
         with InterruptGuard(on_interrupt):
             for step in range(start_step + 1, self.max_steps + 1):
                 current_step = step
