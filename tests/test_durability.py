@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from agent_core.durability import DurableState
 
@@ -27,3 +28,25 @@ def test_interrupted_state_is_locally_resumable(tmp_path: Path):
 
     resumable = state.list_resumable()
     assert [item["execution_id"] for item in resumable] == ["exec_new", "exec_old"]
+
+
+def test_missing_remote_checkpoint_branch_is_not_an_error(tmp_path: Path):
+    state = DurableState(tmp_path / ".agent_state", tmp_path, auto_git=False)
+    calls: list[tuple[str, ...]] = []
+
+    def fake_git(*args: str, timeout: int = 60):
+        calls.append(args)
+        if args == ("rev-parse", "--is-inside-work-tree"):
+            return SimpleNamespace(returncode=0, stdout="true\n", stderr="")
+        if args == ("status", "--porcelain"):
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args == ("ls-remote", "--exit-code", "--heads", "origin", "agent-checkpoints"):
+            return SimpleNamespace(returncode=2, stdout="", stderr="")
+        raise AssertionError(f"unexpected git call: {args}")
+
+    state._git = fake_git  # type: ignore[method-assign]
+
+    result = state.restore_latest_resumable()
+
+    assert result == {"ok": True, "found": False}
+    assert calls[-1] == ("ls-remote", "--exit-code", "--heads", "origin", "agent-checkpoints")
