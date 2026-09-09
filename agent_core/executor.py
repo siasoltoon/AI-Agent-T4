@@ -51,6 +51,8 @@ class AgentExecutor:
         checks: list[dict[str, Any]] = []
         status = self.tools.git_status()
         checks.append({"type": "workspace", "passed": status.get("ok") is True, "stdout": status.get("stdout", ""), "stderr": status.get("stderr", "")})
+        actionable = [h for h in history if h.get("tool") not in {None, "finish"}]
+        checks.append({"type": "execution_evidence", "passed": bool(actionable), "detail": "At least one deterministic tool must run before finish."})
         lower = task.lower()
         if any(x in lower for x in ("test", "tests", "pytest", "test suite")) or any(h.get("tool") == "pytest" for h in history):
             result = self.tools.pytest()
@@ -64,7 +66,10 @@ class AgentExecutor:
             return None
         result = ExecutionResult(execution_id, "completed", summary, step, recovery, verification["checks"])
         self.state.save(execution_id, {**result.__dict__, "task": task, "messages": messages, "history": history, "workspace": str(self.workspace), "updated_at": datetime.now(timezone.utc).isoformat()})
-        self.state.checkpoint_git(execution_id, "completed")
+        checkpoint = self.state.checkpoint_git(execution_id, "completed")
+        if self.state.auto_git and not checkpoint.get("ok"):
+            self.state.save(execution_id, {**result.__dict__, "task": task, "messages": messages, "history": history, "workspace": str(self.workspace), "updated_at": datetime.now(timezone.utc).isoformat(), "checkpoint_error": checkpoint.get("error", "checkpoint failed")})
+            self.emit("checkpoint_warning", checkpoint)
         self.emit("completed", {"summary": summary, "execution_id": execution_id})
         return result
 
@@ -72,7 +77,9 @@ class AgentExecutor:
         self._interrupted = True
         self._snapshot(execution_id, "interrupted", task, messages, history, step, recovery, "Execution interrupted; resume with `agent resume %s`." % execution_id)
         self.tools.interrupt_active_process()
-        self.state.checkpoint_git(execution_id, "interrupted")
+        checkpoint = self.state.checkpoint_git(execution_id, "interrupted")
+        if self.state.auto_git and not checkpoint.get("ok"):
+            self.emit("checkpoint_warning", checkpoint)
         self.emit("interrupted", {"execution_id": execution_id, "signal": signum})
 
     def _run_loop(self, execution_id: str, task: str, messages: list[dict[str, Any]], history: list[dict[str, Any]], start_step: int, recovery: int) -> ExecutionResult:
@@ -89,16 +96,25 @@ class AgentExecutor:
                     if self._interrupted:
                         break
                     response = self.model.chat(messages, tools=TOOL_SCHEMAS, temperature=self.temperature)
+                    if not isinstance(response, dict):
+                        raise RuntimeError("Model returned an invalid response object.")
                     message = response.get("message") or {}
+                    if not isinstance(message, dict):
+                        raise RuntimeError("Model returned an invalid message object.")
                     tool_calls = message.get("tool_calls") or []
                     messages.append(message)
                     if not tool_calls:
                         raise RuntimeError("Model stopped without a tool call; completion requires the finish tool.")
                     for call in tool_calls:
+                        if not isinstance(call, dict):
+                            raise RuntimeError("Model returned an invalid tool call.")
                         fn = call.get("function") or {}
                         name = str(fn.get("name") or "")
                         arguments = fn.get("arguments") or {}
-                        if isinstance(arguments, str): arguments = json.loads(arguments)
+                        if isinstance(arguments, str):
+                            arguments = json.loads(arguments)
+                        if not isinstance(arguments, dict):
+                            raise RuntimeError(f"Tool arguments for {name or 'unknown'} must be an object.")
                         self.emit("tool", {"tool": name, "command": arguments.get("command", name)})
                         result = dispatch(self.tools, name, arguments)
                         record = {"step": step, "tool": name, "arguments": arguments, "ok": result.get("ok", True), "result": result}
