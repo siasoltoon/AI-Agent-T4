@@ -48,7 +48,7 @@ class WorkspaceTools:
             try:
                 stdout, stderr = process.communicate(timeout=seconds)
             except subprocess.TimeoutExpired:
-                self._terminate_process_group(process)
+                self._terminate_process_tree(process)
                 stdout, stderr = process.communicate(timeout=5)
                 raise subprocess.TimeoutExpired(process.args, seconds, output=stdout, stderr=stderr)
             return {"ok": process.returncode == 0, "returncode": process.returncode, "stdout": (stdout or "")[-16000:], "stderr": (stderr or "")[-16000:], "cwd": str(self.workspace)}
@@ -57,35 +57,76 @@ class WorkspaceTools:
                 self._active_process = None
 
     def interrupt_active_process(self) -> bool:
-        """Terminate the currently running shell tool, if any."""
+        """Terminate the currently running shell and all of its descendants."""
         process = self._active_process
         if process is None or process.poll() is not None:
             return False
-        self._terminate_process_group(process)
+        self._terminate_process_tree(process)
         return True
 
     @staticmethod
-    def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+    def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+        """Best-effort termination that also handles descendants holding stdio pipes."""
         if process.poll() is not None:
             return
-        try:
-            if os.name == "nt":
+        if os.name == "nt":
+            try:
                 process.terminate()
-            else:
-                os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
+            except ProcessLookupError:
+                return
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    return
+                process.wait(timeout=2)
             return
+
+        # Kill descendants explicitly as well as the process group. This is
+        # intentionally redundant: descendants can survive if the shell has
+        # changed process-group/session state, and their inherited pipes would
+        # otherwise keep communicate() blocked after the parent is terminated.
+        try:
+            import psutil
+
+            parent = psutil.Process(process.pid)
+            descendants = parent.children(recursive=True)
+        except (ImportError, psutil.Error if "psutil" in locals() else OSError):
+            descendants = []
+
+        for child in descendants:
+            try:
+                child.terminate()
+            except psutil.Error:
+                pass
+
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
         try:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             try:
-                if os.name == "nt":
-                    process.kill()
-                else:
-                    os.killpg(process.pid, signal.SIGKILL)
+                os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
-                return
-            process.wait(timeout=2)
+                pass
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+
+        for child in descendants:
+            try:
+                child.wait(timeout=1)
+            except (psutil.Error, subprocess.TimeoutExpired):
+                try:
+                    child.kill()
+                except psutil.Error:
+                    pass
 
     def read_file(self, path: str, max_chars: int = 30000) -> dict[str, Any]:
         target = self._path(path)
