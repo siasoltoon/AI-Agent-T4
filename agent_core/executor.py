@@ -116,9 +116,11 @@ class AgentExecutor:
                         if not isinstance(arguments, dict):
                             raise RuntimeError(f"Tool arguments for {name or 'unknown'} must be an object.")
                         self.emit("tool", {"tool": name, "command": arguments.get("command", name)})
-                        result = dispatch(self.tools, name, arguments)
-                        record = {"step": step, "tool": name, "arguments": arguments, "ok": result.get("ok", True), "result": result}
+                        record = {"step": step, "tool": name, "arguments": arguments, "status": "started"}
                         history.append(record)
+                        self._snapshot(execution_id, "running", task, messages, history, step, recovery)
+                        result = dispatch(self.tools, name, arguments)
+                        record.update({"ok": result.get("ok", True), "result": result, "status": "completed"})
                         if self._interrupted:
                             break
                         self.emit("observation", {"tool": name, "stdout": result.get("stdout", ""), "stderr": result.get("stderr", "")})
