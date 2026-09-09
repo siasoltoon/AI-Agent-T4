@@ -27,6 +27,16 @@ python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements.txt
 python -m pip install -e .
 
+# Checkpoint commits must remain self-contained on fresh runtimes.
+if ! git config --get user.name >/dev/null 2>&1; then
+  git config user.name "AI Agent"
+fi
+if ! git config --get user.email >/dev/null 2>&1; then
+  git config user.email "ai-agent@localhost"
+fi
+
+echo "[BOOTSTRAP] Git checkpoint identity: $(git config user.name) <$(git config user.email)>"
+
 if ! command -v ollama >/dev/null 2>&1; then
   echo "[BOOTSTRAP] Installing Ollama..."
   if command -v apt-get >/dev/null 2>&1; then
