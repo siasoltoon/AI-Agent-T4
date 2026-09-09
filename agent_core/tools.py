@@ -62,10 +62,13 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {"type": "function", "function": {"name": "git_status", "description": "Show git branch and working-tree status.", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "git_diff", "description": "Show the current unstaged git diff.", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "pytest", "description": "Run the project's pytest suite.", "parameters": {"type": "object", "properties": {"args": {"type": "string"}}}}},
+    {"type": "function", "function": {"name": "finish", "description": "Request completion only after the task has been verified. The runtime performs deterministic verification before accepting this request.", "parameters": {"type": "object", "properties": {"summary": {"type": "string"}, "verification": {"type": "string"}}, "required": ["summary", "verification"]}}},
 ]
 
 
 def dispatch(tools: WorkspaceTools, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    if name == "finish":
+        return {"ok": True, "finish_request": True, "summary": str(arguments.get("summary", "Task completed.")), "verification": str(arguments.get("verification", ""))}
     fn: Callable[..., dict[str, Any]] | None = getattr(tools, name, None)
     if fn is None or name.startswith("_"):
         raise ToolError(f"Unknown tool: {name}")
@@ -77,5 +80,8 @@ def dispatch(tools: WorkspaceTools, name: str, arguments: dict[str, Any]) -> dic
         return {"ok": False, "error": str(exc)}
 
 
-def tool_result_message(tool_call_id: str, result: dict[str, Any]) -> dict[str, Any]:
-    return {"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(result, ensure_ascii=False, default=str)}
+def tool_result_message(tool_call_id: str, result: dict[str, Any], tool_name: str = "") -> dict[str, Any]:
+    message: dict[str, Any] = {"role": "tool", "content": json.dumps(result, ensure_ascii=False, default=str)}
+    if tool_name:
+        message["tool_name"] = tool_name
+    return message
