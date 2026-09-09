@@ -62,12 +62,34 @@ class DurableState:
     def _git(self, *args: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["git", *args], cwd=self.workspace, text=True, capture_output=True, timeout=timeout)
 
+    def _ensure_git_identity(self) -> dict[str, Any]:
+        """Ensure fresh/ephemeral runtimes can create checkpoint commits."""
+        name = self._git("config", "--get", "user.name")
+        email = self._git("config", "--get", "user.email")
+        if name.returncode == 0 and name.stdout.strip() and email.returncode == 0 and email.stdout.strip():
+            return {"ok": True, "changed": False}
+        configured: list[str] = []
+        if name.returncode != 0 or not name.stdout.strip():
+            result = self._git("config", "user.name", "AI Agent")
+            if result.returncode != 0:
+                return {"ok": False, "error": result.stderr[-4000:] or "could not configure Git user.name"}
+            configured.append("user.name")
+        if email.returncode != 0 or not email.stdout.strip():
+            result = self._git("config", "user.email", "ai-agent@localhost")
+            if result.returncode != 0:
+                return {"ok": False, "error": result.stderr[-4000:] or "could not configure Git user.email"}
+            configured.append("user.email")
+        return {"ok": True, "changed": bool(configured), "configured": configured}
+
     def checkpoint_git(self, execution_id: str, reason: str) -> dict[str, Any]:
         if not self.auto_git:
             return {"ok": False, "skipped": True, "reason": "disabled"}
         try:
             if self._git("rev-parse", "--is-inside-work-tree").returncode != 0:
                 return {"ok": False, "error": "workspace is not a git repository"}
+            identity = self._ensure_git_identity()
+            if not identity.get("ok"):
+                return {"ok": False, "error": identity.get("error", "Git identity setup failed")}
             branch = self._git("branch", "--show-current").stdout.strip()
             if not branch:
                 return {"ok": False, "error": "detached HEAD; refusing automatic checkpoint"}
@@ -81,14 +103,14 @@ class DurableState:
                     return {"ok": False, "error": force.stderr[-4000:]}
             diff = self._git("diff", "--cached", "--quiet")
             if diff.returncode == 0:
-                return {"ok": True, "changed": False, "branch": branch}
+                return {"ok": True, "changed": False, "branch": branch, "identity_configured": identity.get("changed", False)}
             commit = self._git("commit", "-m", f"agent checkpoint: {execution_id} ({reason})", timeout=120)
             if commit.returncode != 0:
                 return {"ok": False, "error": commit.stderr[-4000:]}
             push = self._git("push", self.remote, f"HEAD:{self.branch}", timeout=120)
             if push.returncode != 0:
                 return {"ok": False, "committed": True, "pushed": False, "error": push.stderr[-4000:]}
-            return {"ok": True, "changed": True, "pushed": True, "branch": self.branch}
+            return {"ok": True, "changed": True, "pushed": True, "branch": self.branch, "identity_configured": identity.get("changed", False)}
         except (OSError, subprocess.TimeoutExpired) as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -136,8 +158,6 @@ class DurableState:
             if self._git("status", "--porcelain").stdout.strip():
                 return {"ok": False, "found": False, "error": "workspace is not clean; refusing destructive checkpoint restore"}
 
-            # A fresh installation normally has no checkpoint branch yet. Check for
-            # it without treating GitHub's "remote ref not found" response as an error.
             remote_branch = self._git("ls-remote", "--exit-code", "--heads", self.remote, self.branch, timeout=60)
             if remote_branch.returncode == 2:
                 return {"ok": True, "found": False}
@@ -178,24 +198,3 @@ class DurableState:
             return {"ok": True, "found": True, "execution_id": execution_id, "commit": commit, "branch": self.branch}
         except (OSError, subprocess.TimeoutExpired) as exc:
             return {"ok": False, "found": False, "error": str(exc)}
-
-
-class InterruptGuard:
-    """Convert SIGINT/SIGTERM into a callback so state can be persisted first."""
-
-    def __init__(self, callback):
-        self.callback = callback
-        self.previous: dict[int, Any] = {}
-
-    def __enter__(self):
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            self.previous[sig] = signal.getsignal(sig)
-            signal.signal(sig, self._handle)
-        return self
-
-    def _handle(self, signum, _frame):
-        self.callback(signum)
-
-    def __exit__(self, *_args):
-        for sig, handler in self.previous.items():
-            signal.signal(sig, handler)
