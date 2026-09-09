@@ -95,6 +95,30 @@ def cmd_resume(execution_id: str) -> int:
     return 0 if result.status == "completed" else 1
 
 
+def cmd_recover() -> int:
+    """Recover the newest running/interrupted execution without failing on a clean startup."""
+    state = durable()
+    local = state.list_resumable()
+    if local:
+        execution_id = str(local[0]["execution_id"])
+        console.print(f"[bold cyan][RECOVERY][/bold cyan] Resuming {execution_id}")
+        result = runtime().resume(execution_id)
+        return 0 if result.status == "completed" else 1
+
+    restored = state.restore_latest_resumable()
+    if not restored.get("ok"):
+        console.print(f"[bold red]✗ Automatic recovery failed:[/bold red] {restored.get('error')}")
+        return 1
+    if not restored.get("found"):
+        console.print("[bold green][READY][/bold green] No interrupted execution to resume.")
+        return 0
+
+    execution_id = str(restored["execution_id"])
+    console.print(f"[bold cyan][RECOVERY][/bold cyan] Restored {execution_id} from {restored['branch']} @ {restored['commit'][:12]}")
+    result = runtime().resume(execution_id)
+    return 0 if result.status == "completed" else 1
+
+
 def cmd_status() -> int:
     model = OllamaRuntime(SETTINGS.ollama_host, SETTINGS.model_name, SETTINGS.model_timeout_seconds)
     health = model.health()
@@ -141,10 +165,12 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("run"); p.add_argument("task", nargs="+")
     r = sub.add_parser("resume"); r.add_argument("execution_id", help="Execution ID or 'latest'")
+    sub.add_parser("recover")
     sub.add_parser("status"); sub.add_parser("health"); sub.add_parser("gpu"); sub.add_parser("model"); sub.add_parser("history")
     args = parser.parse_args()
     if args.command == "run": return cmd_run(" ".join(args.task))
     if args.command == "resume": return cmd_resume(args.execution_id)
+    if args.command == "recover": return cmd_recover()
     if args.command == "status": return cmd_status()
     if args.command == "health": return cmd_health()
     if args.command == "gpu": return cmd_gpu()
