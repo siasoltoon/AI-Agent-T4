@@ -65,7 +65,6 @@ class DurableState:
             add = self._git("add", "-A")
             if add.returncode != 0:
                 return {"ok": False, "error": add.stderr[-4000:]}
-            # State is intentionally ignored during normal development, but execution state is part of the disaster-recovery record.
             state_path = self.state_dir / f"{execution_id}.json"
             if state_path.exists() and self.workspace in state_path.parents:
                 force = self._git("add", "-f", str(state_path.relative_to(self.workspace)))
@@ -85,12 +84,11 @@ class DurableState:
             return {"ok": False, "error": str(exc)}
 
     def restore_from_remote(self, execution_id: str | None = None) -> dict[str, Any]:
-        """Restore a clean workspace from the latest or requested remote checkpoint."""
+        """Restore the workspace and state from a clean remote checkpoint."""
         try:
             if self._git("rev-parse", "--is-inside-work-tree").returncode != 0:
                 return {"ok": False, "error": "workspace is not a git repository"}
-            status = self._git("status", "--porcelain").stdout.strip()
-            if status:
+            if self._git("status", "--porcelain").stdout.strip():
                 return {"ok": False, "error": "workspace is not clean; refusing destructive checkpoint restore"}
             fetch = self._git("fetch", self.remote, self.branch, timeout=120)
             if fetch.returncode != 0:
@@ -98,23 +96,22 @@ class DurableState:
             remote_ref = f"{self.remote}/{self.branch}"
             if self._git("rev-parse", "--verify", remote_ref).returncode != 0:
                 return {"ok": False, "error": f"checkpoint branch not found: {remote_ref}"}
+
             if execution_id:
-                pattern = f".agent_state/{execution_id}.json"
-                commit = self._git("log", "-1", "--format=%H", remote_ref, "--", pattern).stdout.strip()
+                state_path = f".agent_state/{execution_id}.json"
+                commit = self._git("log", "-1", "--format=%H", remote_ref, "--", state_path).stdout.strip()
                 if not commit:
                     return {"ok": False, "error": f"remote execution not found: {execution_id}"}
             else:
                 commit = self._git("log", "-1", "--format=%H", remote_ref, "--", ".agent_state").stdout.strip()
                 if not commit:
                     return {"ok": False, "error": "no remote execution state found"}
-                execution_id = self._git("show", f"{commit}:.agent_state", timeout=60).stderr.strip() if False else None
                 names = self._git("ls-tree", "-r", "--name-only", commit, ".agent_state").stdout.splitlines()
-                state_names = [n for n in names if n.startswith(".agent_state/exec_") and n.endswith(".json")]
+                state_names = sorted(n for n in names if n.startswith(".agent_state/exec_") and n.endswith(".json"))
                 if not state_names:
                     return {"ok": False, "error": "remote checkpoint contains no execution state"}
-                latest_name = state_names[-1]
-                execution_id = Path(latest_name).stem
-                commit = self._git("log", "-1", "--format=%H", remote_ref, "--", latest_name).stdout.strip() or commit
+                execution_id = Path(state_names[-1]).stem
+
             reset = self._git("reset", "--hard", commit, timeout=120)
             if reset.returncode != 0:
                 return {"ok": False, "error": reset.stderr[-4000:] or "git reset failed"}
