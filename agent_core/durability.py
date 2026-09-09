@@ -128,6 +128,48 @@ class DurableState:
         except (OSError, subprocess.TimeoutExpired) as exc:
             return {"ok": False, "error": str(exc)}
 
+    def restore_latest_resumable(self) -> dict[str, Any]:
+        """Restore the newest running/interrupted remote execution, if one exists."""
+        try:
+            if self._git("rev-parse", "--is-inside-work-tree").returncode != 0:
+                return {"ok": False, "found": False, "error": "workspace is not a git repository"}
+            if self._git("status", "--porcelain").stdout.strip():
+                return {"ok": False, "found": False, "error": "workspace is not clean; refusing destructive checkpoint restore"}
+            fetch = self._git("fetch", self.remote, self.branch, timeout=120)
+            if fetch.returncode != 0:
+                return {"ok": False, "found": False, "error": fetch.stderr[-4000:] or "git fetch failed"}
+            remote_ref = f"{self.remote}/{self.branch}"
+            if self._git("rev-parse", "--verify", remote_ref).returncode != 0:
+                return {"ok": True, "found": False}
+
+            names = self._git("ls-tree", "-r", "--name-only", remote_ref, ".agent_state").stdout.splitlines()
+            candidates: list[tuple[str, str, str]] = []
+            for name in names:
+                if not name.startswith(".agent_state/exec_") or not name.endswith(".json"):
+                    continue
+                execution_id = Path(name).stem
+                raw = self._git("show", f"{remote_ref}:{name}").stdout
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if data.get("status") not in {"running", "interrupted"}:
+                    continue
+                updated_at = str(data.get("updated_at", ""))
+                commit = self._git("log", "-1", "--format=%H", remote_ref, "--", name).stdout.strip()
+                if commit:
+                    candidates.append((updated_at, execution_id, commit))
+
+            if not candidates:
+                return {"ok": True, "found": False}
+            _, execution_id, commit = max(candidates, key=lambda item: item[0])
+            reset = self._git("reset", "--hard", commit, timeout=120)
+            if reset.returncode != 0:
+                return {"ok": False, "found": True, "error": reset.stderr[-4000:] or "git reset failed"}
+            return {"ok": True, "found": True, "execution_id": execution_id, "commit": commit, "branch": self.branch}
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"ok": False, "found": False, "error": str(exc)}
+
 
 class InterruptGuard:
     """Convert SIGINT/SIGTERM into a callback so state can be persisted first."""
