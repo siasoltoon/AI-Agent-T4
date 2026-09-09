@@ -38,6 +38,7 @@ class Settings:
     state_dir: Path = Path(os.getenv("STATE_DIR", ".agent_state")).resolve()
     max_agent_steps: int = _int("MAX_AGENT_STEPS", 64, 1, 128)
     max_recovery_attempts: int = _int("MAX_RECOVERY_ATTEMPTS", 8, 0, 12)
+    max_model_retries: int = _int("MAX_MODEL_RETRIES", 4, 0, 8)
     max_command_seconds: int = _int("MAX_COMMAND_SECONDS", 600, 1, 600)
     model_timeout_seconds: int = _int("MODEL_TIMEOUT_SECONDS", 900, 10, 3600)
     model_temperature: float = _float("MODEL_TEMPERATURE", 0.1, 0.0, 1.0)
