@@ -135,6 +135,15 @@ class DurableState:
                 return {"ok": False, "found": False, "error": "workspace is not a git repository"}
             if self._git("status", "--porcelain").stdout.strip():
                 return {"ok": False, "found": False, "error": "workspace is not clean; refusing destructive checkpoint restore"}
+
+            # A fresh installation normally has no checkpoint branch yet. Check for
+            # it without treating GitHub's "remote ref not found" response as an error.
+            remote_branch = self._git("ls-remote", "--exit-code", "--heads", self.remote, self.branch, timeout=60)
+            if remote_branch.returncode == 2:
+                return {"ok": True, "found": False}
+            if remote_branch.returncode != 0:
+                return {"ok": False, "found": False, "error": remote_branch.stderr[-4000:] or "git ls-remote failed"}
+
             fetch = self._git("fetch", self.remote, self.branch, timeout=120)
             if fetch.returncode != 0:
                 return {"ok": False, "found": False, "error": fetch.stderr[-4000:] or "git fetch failed"}
