@@ -29,14 +29,21 @@ def init_git(path: Path) -> None:
     subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
 
 
-def test_finish_requires_deterministic_verification(tmp_path: Path):
+def test_finish_without_execution_evidence_is_rejected(tmp_path: Path):
+    init_git(tmp_path)
+    model = FakeModel([tool_call("finish", {"summary": "done", "verification": "trust me"})])
+    result = AgentExecutor(model, tmp_path, max_steps=1, max_recovery=0, auto_git_checkpoint=False).run("Do the task")
+    assert result.status == "failed"
+    assert "verification" in result.summary.lower()
+
+
+def test_normal_finish_after_deterministic_tool_succeeds(tmp_path: Path):
     init_git(tmp_path)
     model = FakeModel([
-        tool_call("finish", {"summary": "done", "verification": "trust me"}),
-        tool_call("write_file", {"path": "verified.txt", "content": "ok"}, "call-2"),
-        tool_call("finish", {"summary": "verified", "verification": "file exists"}, "call-3"),
+        tool_call("write_file", {"path": "verified.txt", "content": "ok"}),
+        tool_call("finish", {"summary": "verified", "verification": "write_file succeeded"}, "call-2"),
     ])
-    result = AgentExecutor(model, tmp_path, max_steps=3, max_recovery=1, auto_git_checkpoint=False).run("Create verified.txt")
+    result = AgentExecutor(model, tmp_path, max_steps=2, max_recovery=0, auto_git_checkpoint=False).run("Create verified.txt")
     assert result.status == "completed"
     assert (tmp_path / "verified.txt").read_text() == "ok"
 
@@ -60,16 +67,12 @@ def test_resumable_returns_running_and_interrupted_newest_first(tmp_path: Path):
     assert [item["execution_id"] for item in state.list_resumable()] == ["exec_new", "exec_old"]
 
 
-def test_model_without_tool_call_is_recoverable(tmp_path: Path):
+def test_model_without_tool_call_hits_failure_budget_cleanly(tmp_path: Path):
     init_git(tmp_path)
-    model = FakeModel([
-        {"message": {"role": "assistant", "content": "I am finished."}},
-        tool_call("write_file", {"path": "result.txt", "content": "ok"}, "call-2"),
-        tool_call("finish", {"summary": "finished", "verification": "result.txt was written"}, "call-3"),
-    ])
-    result = AgentExecutor(model, tmp_path, max_steps=3, max_recovery=1, auto_git_checkpoint=False).run("Create result.txt")
-    assert result.status == "completed"
-    assert result.recovery_attempts == 1
+    model = FakeModel([{"message": {"role": "assistant", "content": "I am finished."}}])
+    result = AgentExecutor(model, tmp_path, max_steps=1, max_recovery=0, auto_git_checkpoint=False).run("Create a file")
+    assert result.status == "failed"
+    assert "tool call" in result.summary.lower()
 
 
 def test_tool_output_is_bounded(tmp_path: Path):
