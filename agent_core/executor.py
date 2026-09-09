@@ -31,7 +31,7 @@ class ExecutionResult:
 
 
 class AgentExecutor:
-    def __init__(self, model: Any, workspace: Path, max_steps: int = 32, max_recovery: int = 6, max_command_seconds: int = 600, temperature: float = 0.1, emit: Callable[[str, dict[str, Any]], None] | None = None, state_dir: Path | None = None, auto_git_checkpoint: bool = True, git_remote: str = "origin", checkpoint_branch: str = "agent-checkpoints", checkpoint_every_tool: bool = True) -> None:
+    def __init__(self, model: Any, workspace: Path, max_steps: int = 32, max_recovery: int = 6, max_command_seconds: int = 600, temperature: float = 0.1, emit: Callable[[str, dict[str, Any]], None] | None = None, state_dir: Path | None = None, auto_git_checkpoint: bool = True, git_remote: str = "origin", checkpoint_branch: str = "agent-checkpoints", checkpoint_every_tool: bool = True, max_context_chars: int = 12000) -> None:
         self.model = model
         self.workspace = workspace.resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -39,6 +39,7 @@ class AgentExecutor:
         self.max_steps = max(1, min(int(max_steps), 128))
         self.max_recovery = max(0, min(int(max_recovery), 12))
         self.temperature = max(0.0, min(float(temperature), 1.0))
+        self.max_context_chars = max(4000, min(int(max_context_chars), 120000))
         self.emit = emit or (lambda _event, _data: None)
         self.state = DurableState(state_dir or (self.workspace / ".agent_state"), self.workspace, auto_git_checkpoint, git_remote, checkpoint_branch)
         self.checkpoint_every_tool = checkpoint_every_tool
@@ -46,6 +47,31 @@ class AgentExecutor:
 
     def _snapshot(self, execution_id: str, status: str, task: str, messages: list[dict[str, Any]], history: list[dict[str, Any]], step: int, recovery: int, summary: str = "") -> None:
         self.state.save(execution_id, {"execution_id": execution_id, "status": status, "task": task, "messages": messages, "history": history[-100:], "steps": step, "recovery_attempts": recovery, "summary": summary, "workspace": str(self.workspace), "updated_at": datetime.now(timezone.utc).isoformat()})
+
+    def _model_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not messages:
+            return []
+        encoded = lambda items: len(json.dumps(items, ensure_ascii=False, separators=(",", ":")))
+        if encoded(messages) <= self.max_context_chars:
+            return messages
+        if len(messages) <= 2:
+            return [{**messages[0], "content": str(messages[0].get("content", ""))[: self.max_context_chars]}]
+
+        base = messages[:2]
+        selected: list[dict[str, Any]] = []
+        used = encoded(base)
+        for index in range(len(messages) - 1, 1, -1):
+            candidate = messages[index]
+            pair = [messages[index - 1], candidate] if candidate.get("role") == "tool" and index > 1 else [candidate]
+            pair_size = encoded(pair)
+            if used + pair_size > self.max_context_chars:
+                break
+            selected[0:0] = pair
+            used += pair_size
+        result = base + selected
+        if encoded(result) > self.max_context_chars:
+            result = base
+        return result
 
     def _verify(self, task: str, history: list[dict[str, Any]]) -> dict[str, Any]:
         checks: list[dict[str, Any]] = []
@@ -95,7 +121,7 @@ class AgentExecutor:
                 try:
                     if self._interrupted:
                         break
-                    response = self.model.chat(messages, tools=TOOL_SCHEMAS, temperature=self.temperature)
+                    response = self.model.chat(self._model_messages(messages), tools=TOOL_SCHEMAS, temperature=self.temperature)
                     if not isinstance(response, dict):
                         raise RuntimeError("Model returned an invalid response object.")
                     message = response.get("message") or {}
