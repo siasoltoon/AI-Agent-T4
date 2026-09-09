@@ -30,6 +30,7 @@ def runtime() -> AgentExecutor:
         checkpoint_branch=SETTINGS.checkpoint_branch,
         checkpoint_every_tool=SETTINGS.checkpoint_every_tool,
         max_context_chars=SETTINGS.max_context_chars,
+        max_output_chars=SETTINGS.max_output_chars,
     )
 
 
@@ -100,7 +101,7 @@ def cmd_status() -> int:
     state = durable()
     running = state.list_running()
     resumable = state.list_resumable()
-    console.print(Panel(f"Workspace: {SETTINGS.workspace_root}\nState: {SETTINGS.state_dir}\nModel: {SETTINGS.model_name}\nOllama: {SETTINGS.ollama_host}\nModel runtime: {health.get('ok')}\nModel present: {health.get('model_present', False)}\nMax steps: {SETTINGS.max_agent_steps}\nMax recovery: {SETTINGS.max_recovery_attempts}\nMax command seconds: {SETTINGS.max_command_seconds}\nCheckpoint branch: {SETTINGS.checkpoint_branch}\nRunning executions: {len(running)}\nResumable executions: {len(resumable)}"))
+    console.print(Panel(f"Workspace: {SETTINGS.workspace_root}\nState: {SETTINGS.state_dir}\nModel: {SETTINGS.model_name}\nOllama: {SETTINGS.ollama_host}\nModel runtime: {health.get('ok')}\nModel present: {health.get('model_present', False)}\nMax steps: {SETTINGS.max_agent_steps}\nMax recovery: {SETTINGS.max_recovery_attempts}\nMax command seconds: {SETTINGS.max_command_seconds}\nMax context chars: {SETTINGS.max_context_chars}\nMax tool output chars: {SETTINGS.max_output_chars}\nCheckpoint branch: {SETTINGS.checkpoint_branch}\nRunning executions: {len(running)}\nResumable executions: {len(resumable)}"))
     return 0 if health.get("ok") and health.get("model_present") else 1
 
 
