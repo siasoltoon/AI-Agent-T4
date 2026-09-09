@@ -32,6 +32,7 @@ class OllamaRuntime:
             "prompt": prompt,
             "system": system,
             "stream": False,
+            "format": "json",
             "options": {"temperature": temperature},
         }
         try:
@@ -43,7 +44,7 @@ class OllamaRuntime:
             if not text:
                 raise ModelRuntimeError("Ollama returned an empty response.")
             return text
+        except ModelRuntimeError:
+            raise
         except Exception as exc:
-            if isinstance(exc, ModelRuntimeError):
-                raise
             raise ModelRuntimeError(f"Model runtime request failed: {exc}") from exc
