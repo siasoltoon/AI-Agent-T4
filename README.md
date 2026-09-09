@@ -11,6 +11,7 @@ Production-oriented, terminal-first autonomous coding agent for ephemeral GPU ru
 - **Deterministic completion gate** — the model must request the `finish` tool; runtime verification is performed before completion is accepted.
 - **Coding tools** — shell, targeted file read/write, pytest, git status and git diff.
 - **Persistent execution state** — atomic JSON checkpoints under `.agent_state/` make runs auditable and resumable at the runtime level.
+- **Remote disaster recovery** — every configured checkpoint can commit execution state and workspace changes to the dedicated `agent-checkpoints` branch; a fresh runtime can fetch and restore the latest or a specific execution when the workspace is clean.
 - **Failure recovery** — failed tool calls feed explicit failure evidence back into the next model turn.
 - **Workspace path controls** — structured file tools reject paths that resolve outside the configured workspace.
 - **Terminal-first UX** — no dashboard or frontend dependency.
@@ -50,6 +51,10 @@ Production-oriented, terminal-first autonomous coding agent for ephemeral GPU ru
                     │
                     └──────► next model turn
 
+       after each tool ──► atomic state ──► Git checkpoint
+                                               │
+                                               └──► GitHub
+
              finish ──► deterministic verify ──► COMPLETED
                          │
                          └──────────────► recovery if failed
@@ -74,10 +79,34 @@ agent run "Inspect this repository, run the tests, fix any failures, and verify 
 agent history
 ```
 
+## Resume after interruption or runtime loss
+
+Execution state is written atomically after tool observations. With `CHECKPOINT_EVERY_TOOL=true`, the workspace and execution state are also committed and pushed to `CHECKPOINT_BRANCH` after each tool when GitHub is reachable. A SIGINT/SIGTERM handler performs a final interruption snapshot and checkpoint before returning control.
+
+If the runtime disappears before a checkpoint can be pushed, only the latest successfully pushed checkpoint can be recovered; a hard kill such as `SIGKILL` cannot be intercepted. This is why frequent checkpoints are enabled by default.
+
+On the same runtime, resume directly:
+
+```bash
+agent resume exec_YYYYMMDDHHMMSS_ab12cd34
+```
+
+After a fresh clone/runtime, the same command can recover the requested execution from the remote checkpoint branch when the workspace is clean. To recover the newest execution automatically:
+
+```bash
+agent resume latest
+```
+
+The recovery path refuses to overwrite a dirty workspace. This is deliberate: disaster recovery must never silently destroy unrelated local work.
+
+If GitHub is temporarily unreachable, local `.agent_state` remains usable. Once connectivity returns, a later checkpoint can push the durable state. Remote recovery itself requires the checkpoint branch to have been successfully pushed at least once.
+
 ## CLI
 
 ```text
 agent run <task>       Autonomous coding task
+agent resume <id>      Resume a specific execution; restores remote checkpoint if needed
+agent resume latest    Resume the newest recoverable execution
 agent status            Runtime/model configuration
 agent health            Model + GPU health
 agent gpu               NVIDIA GPU snapshot
@@ -100,6 +129,10 @@ Copy `.env.example` to `.env` and tune the runtime for the deployment. Important
 - `MODEL_TEMPERATURE`
 - `MAX_CONTEXT_CHARS`
 - `MAX_TOOL_OUTPUT_CHARS`
+- `AUTO_GIT_CHECKPOINT`
+- `GIT_REMOTE`
+- `CHECKPOINT_BRANCH`
+- `CHECKPOINT_EVERY_TOOL`
 
 For a T4 with Qwen3-Coder 30B, start conservatively and increase context only after measuring VRAM/RAM usage.
 
@@ -112,7 +145,7 @@ python -m compileall -q agent_core config linux_runtime model_runtime terminal_u
 
 ## Colab lifecycle
 
-Colab runtimes are disposable. Keep the repository and configuration as the source of truth; Ollama/model caches and Web Terminal processes may disappear after a runtime reset. Run the bootstrap process again when required.
+Colab runtimes are disposable. Keep the repository and configuration as the source of truth; Ollama/model caches and Web Terminal processes may disappear after a runtime reset. Run the bootstrap process again when required, then use `agent resume latest` to recover the newest successfully pushed execution checkpoint.
 
 ## Security boundary
 
@@ -126,4 +159,5 @@ The agent is intended to operate on a workspace supplied by the operator. Struct
 4. Failures become observations, not silent retries.
 5. Budgets prevent infinite loops.
 6. State is persisted atomically.
-7. The model proposes actions; deterministic runtime code executes them.
+7. Checkpoints make ephemeral runtimes recoverable.
+8. The model proposes actions; deterministic runtime code executes them.
