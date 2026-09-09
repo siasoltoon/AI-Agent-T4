@@ -5,6 +5,7 @@ import os
 import signal
 import subprocess
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -39,16 +40,24 @@ class DurableState:
             raise FileNotFoundError(f"Execution state not found: {execution_id}")
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def list_running(self) -> list[dict[str, Any]]:
+    def _list_by_status(self, statuses: set[str]) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         for path in self.state_dir.glob("exec_*.json"):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-                if data.get("status") == "running":
+                if data.get("status") in statuses:
+                    data.setdefault("updated_at", datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat())
                     items.append(data)
             except (OSError, json.JSONDecodeError):
                 continue
         return sorted(items, key=lambda x: x.get("updated_at", ""), reverse=True)
+
+    def list_running(self) -> list[dict[str, Any]]:
+        return self._list_by_status({"running"})
+
+    def list_resumable(self) -> list[dict[str, Any]]:
+        """Return local executions that can safely be resumed, newest first."""
+        return self._list_by_status({"running", "interrupted"})
 
     def _git(self, *args: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["git", *args], cwd=self.workspace, text=True, capture_output=True, timeout=timeout)
