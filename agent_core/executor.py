@@ -103,6 +103,8 @@ class AgentExecutor:
                         result = dispatch(self.tools, name, arguments)
                         record = {"step": step, "tool": name, "arguments": arguments, "ok": result.get("ok", True), "result": result}
                         history.append(record)
+                        if self._interrupted:
+                            break
                         self.emit("observation", {"tool": name, "stdout": result.get("stdout", ""), "stderr": result.get("stderr", "")})
                         if name == "finish" and result.get("finish_request"):
                             completed = self._finish(execution_id, task, history, messages, step, recovery, result.get("summary", "Task completed and verified."))
