@@ -50,3 +50,29 @@ def test_missing_remote_checkpoint_branch_is_not_an_error(tmp_path: Path):
 
     assert result == {"ok": True, "found": False}
     assert calls[-1] == ("ls-remote", "--exit-code", "--heads", "origin", "agent-checkpoints")
+
+
+def test_git_identity_is_self_healed_on_fresh_runtime(tmp_path: Path):
+    state = DurableState(tmp_path / ".agent_state", tmp_path, auto_git=True)
+    calls: list[tuple[str, ...]] = []
+
+    def fake_git(*args: str, timeout: int = 60):
+        calls.append(args)
+        if args == ("config", "--get", "user.name"):
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        if args == ("config", "--get", "user.email"):
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        if args == ("config", "user.name", "AI Agent"):
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args == ("config", "user.email", "ai-agent@localhost"):
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected git call: {args}")
+
+    state._git = fake_git  # type: ignore[method-assign]
+
+    result = state._ensure_git_identity()
+
+    assert result["ok"] is True
+    assert result["changed"] is True
+    assert ("config", "user.name", "AI Agent") in calls
+    assert ("config", "user.email", "ai-agent@localhost") in calls
