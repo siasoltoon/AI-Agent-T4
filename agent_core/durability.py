@@ -53,8 +53,10 @@ class DurableState:
     def checkpoint_git(self, execution_id: str, reason: str) -> dict[str, Any]:
         if not self.auto_git:
             return {"ok": False, "skipped": True, "reason": "disabled"}
-        def run(*args: str) -> subprocess.CompletedProcess[str]:
-            return subprocess.run(list(args), cwd=self.workspace, text=True, capture_output=True, timeout=60)
+
+        def run(*args: str, check_timeout: int = 60) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(list(args), cwd=self.workspace, text=True, capture_output=True, timeout=check_timeout)
+
         try:
             if run("git", "rev-parse", "--is-inside-work-tree").returncode != 0:
                 return {"ok": False, "error": "workspace is not a git repository"}
@@ -64,13 +66,19 @@ class DurableState:
             add = run("git", "add", "-A")
             if add.returncode != 0:
                 return {"ok": False, "error": add.stderr[-4000:]}
+            # State is intentionally ignored during normal development, but execution state is part of the disaster-recovery record.
+            state_path = self.state_dir / f"{execution_id}.json"
+            if state_path.exists() and self.workspace in state_path.parents:
+                force = run("git", "add", "-f", str(state_path.relative_to(self.workspace)))
+                if force.returncode != 0:
+                    return {"ok": False, "error": force.stderr[-4000:]}
             diff = run("git", "diff", "--cached", "--quiet")
             if diff.returncode == 0:
                 return {"ok": True, "changed": False, "branch": branch}
-            commit = run("git", "commit", "-m", f"agent checkpoint: {execution_id} ({reason})")
+            commit = run("git", "commit", "-m", f"agent checkpoint: {execution_id} ({reason})", check_timeout=120)
             if commit.returncode != 0:
                 return {"ok": False, "error": commit.stderr[-4000:]}
-            push = run("git", "push", self.remote, f"HEAD:{self.branch}")
+            push = run("git", "push", self.remote, f"HEAD:{self.branch}", check_timeout=120)
             if push.returncode != 0:
                 return {"ok": False, "committed": True, "pushed": False, "error": push.stderr[-4000:]}
             return {"ok": True, "changed": True, "pushed": True, "branch": self.branch}
