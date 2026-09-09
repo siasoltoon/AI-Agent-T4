@@ -11,7 +11,6 @@ from typing import Any, Callable
 from linux_runtime.shell import LinuxShell
 from model_runtime.ollama import ModelRuntimeError, OllamaRuntime
 
-
 SYSTEM_PROMPT = '''You are an autonomous software agent running in a Linux terminal workspace.
 You must act, observe, and verify. Never claim a task is complete merely because you proposed a solution.
 At every turn return exactly one JSON object and no markdown:
@@ -20,7 +19,7 @@ or
 {"action":"finish","summary":"...","verification":"..."}
 Use shell for inspection, editing, tests, git, Python and other commands. Keep commands focused.
 After mutations, verify them with a real command. If a command fails, diagnose and retry when useful.
-Never use paths outside the configured workspace unless the user explicitly asks for system inspection.
+Never use paths outside the configured workspace.
 '''
 
 
@@ -47,9 +46,7 @@ class AgentExecutor:
     @staticmethod
     def _json(text: str) -> dict[str, Any]:
         text = str(text).strip()
-        candidates = [text]
-        candidates += re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.I | re.S)
-        for candidate in candidates:
+        for candidate in [text, *re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.I | re.S)]:
             try:
                 value = json.loads(candidate)
                 if isinstance(value, dict):
@@ -72,16 +69,15 @@ class AgentExecutor:
 
     def _verify(self, task: str, history: list[dict[str, Any]]) -> dict[str, Any]:
         checks: list[dict[str, Any]] = []
-        mutation_seen = any(h.get("tool") == "shell" and any(x in str(h.get("command", "")) for x in (" > ", "mkdir", "cp ", "mv ", "rm ", "git commit", "sed -i", "python")) for h in history)
-        if mutation_seen:
-            check = self.shell.run("git status --short 2>/dev/null || true", timeout=30)
-            checks.append({"type": "workspace_state", "passed": check.get("returncode") == 0, "stdout": check.get("stdout", "")})
-        verify_words = ("test", "verify", "check", "ensure", "run")
-        if any(word in task.lower() for word in verify_words):
+        commands = [str(h.get("command", "")) for h in history if h.get("tool") == "shell"]
+        if commands:
+            check = self.shell.run("pwd && git status --short 2>/dev/null || true", timeout=30)
+            checks.append({"type": "workspace_reachable", "passed": check.get("returncode") == 0, "stdout": check.get("stdout", "")})
+        wants_tests = bool(re.search(r"\b(test|tests|pytest|test suite|unit tests)\b", task.lower()))
+        if wants_tests:
             check = self.shell.run("python -m pytest -q", timeout=120)
             checks.append({"type": "pytest", "passed": check.get("ok") is True, "stdout": check.get("stdout", ""), "stderr": check.get("stderr", "")})
-        passed = all(c["passed"] for c in checks) if checks else True
-        return {"passed": passed, "checks": checks}
+        return {"passed": all(c["passed"] for c in checks) if checks else True, "checks": checks}
 
     def run(self, task: str) -> ExecutionResult:
         execution_id = f"exec_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
@@ -93,9 +89,7 @@ class AgentExecutor:
         for step in range(1, self.max_steps + 1):
             self.emit("step", {"number": step, "max": self.max_steps})
             try:
-                prompt = self._context(task, history)
-                response = self.model.generate(prompt, system=SYSTEM_PROMPT)
-                decision = self._json(response)
+                decision = self._json(self.model.generate(self._context(task, history), system=SYSTEM_PROMPT))
                 action = str(decision.get("action", "")).lower()
                 if action == "finish":
                     verification = self._verify(task, history)
@@ -104,21 +98,23 @@ class AgentExecutor:
                         summary = str(decision.get("summary", "Task completed and verified."))
                         self.emit("completed", {"summary": summary, "execution_id": execution_id})
                         return ExecutionResult(execution_id, "completed", summary, step, recovery, verification["checks"])
-                    raise RuntimeError("Model requested completion but deterministic verification failed.")
+                    raise RuntimeError("Completion rejected: deterministic verification failed.")
 
                 if action != "tool" or str(decision.get("tool", "")).lower() != "shell":
                     raise ValueError("Only the shell tool is accepted by this terminal-first runtime.")
                 args = decision.get("arguments") or {}
                 command = str(args.get("command", "")).strip()
                 timeout = int(args.get("timeout", 120))
+                if not command:
+                    raise ValueError("Shell command cannot be empty.")
                 self.emit("tool", {"tool": "shell", "command": command})
                 result = self.shell.run(command, timeout=timeout)
                 record = {"step": step, "tool": "shell", "command": command, "ok": result.get("ok"), "stdout": result.get("stdout", ""), "stderr": result.get("stderr", ""), "returncode": result.get("returncode")}
                 history.append(record)
                 self.emit("observation", record)
                 if not result.get("ok"):
-                    raise RuntimeError(f"Command failed with exit code {result.get('returncode')}: {result.get('stderr', '')[-2000:]}")
-            except (ModelRuntimeError, Exception) as exc:
+                    raise RuntimeError(f"Command failed: {result.get('stderr', '')[-2000:]}")
+            except Exception as exc:
                 if recovery >= self.max_recovery:
                     self.emit("failed", {"error": str(exc), "execution_id": execution_id})
                     return ExecutionResult(execution_id, "failed", str(exc), step, recovery, history)
