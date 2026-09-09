@@ -2,10 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import signal
-import sys
-from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
@@ -24,7 +20,9 @@ def runtime() -> AgentExecutor:
         SETTINGS.workspace_root,
         SETTINGS.max_agent_steps,
         SETTINGS.max_recovery_attempts,
-        emit=lambda event, data: render(event, data),
+        SETTINGS.max_command_seconds,
+        SETTINGS.model_temperature,
+        emit=render,
     )
 
 
@@ -56,32 +54,47 @@ def render(event: str, data: dict) -> None:
 def cmd_run(task: str) -> int:
     result = runtime().run(task)
     SETTINGS.state_dir.mkdir(parents=True, exist_ok=True)
-    with (SETTINGS.state_dir / f"{result.execution_id}.json").open("w", encoding="utf-8") as handle:
-        json.dump(result.__dict__, handle, ensure_ascii=False, indent=2, default=str)
+    (SETTINGS.state_dir / f"{result.execution_id}.json").write_text(
+        json.dumps(result.__dict__, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+    )
     return 0 if result.status == "completed" else 1
 
 
 def cmd_status() -> int:
     model = OllamaRuntime(SETTINGS.ollama_host, SETTINGS.model_name, SETTINGS.model_timeout_seconds)
-    console.print(Panel(f"Workspace: {SETTINGS.workspace_root}\nState: {SETTINGS.state_dir}\nModel: {SETTINGS.model_name}\nOllama: {SETTINGS.ollama_host}\nModel runtime: {model.health().get('ok')}"))
-    return 0
+    health = model.health()
+    console.print(Panel(
+        f"Workspace: {SETTINGS.workspace_root}\n"
+        f"State: {SETTINGS.state_dir}\n"
+        f"Model: {SETTINGS.model_name}\n"
+        f"Ollama: {SETTINGS.ollama_host}\n"
+        f"Model runtime: {health.get('ok')}\n"
+        f"Model present: {health.get('model_present', False)}\n"
+        f"Max steps: {SETTINGS.max_agent_steps}\n"
+        f"Max recovery: {SETTINGS.max_recovery_attempts}\n"
+        f"Max command seconds: {SETTINGS.max_command_seconds}"
+    ))
+    return 0 if health.get("ok") and health.get("model_present") else 1
 
 
 def cmd_health() -> int:
-    cmd_status()
-    console.print(json.dumps(gpu_snapshot(), ensure_ascii=False, indent=2))
-    return 0
+    model = OllamaRuntime(SETTINGS.ollama_host, SETTINGS.model_name, SETTINGS.model_timeout_seconds)
+    model_health = model.health()
+    gpu = gpu_snapshot()
+    console.print(Panel(json.dumps({"model": model_health, "gpu": gpu}, ensure_ascii=False, indent=2)))
+    return 0 if model_health.get("ok") and model_health.get("model_present") else 1
 
 
 def cmd_gpu() -> int:
     console.print_json(json.dumps(gpu_snapshot()))
-    return 0
+    return 0 if gpu_snapshot().get("ok") else 1
 
 
 def cmd_model() -> int:
     model = OllamaRuntime(SETTINGS.ollama_host, SETTINGS.model_name, SETTINGS.model_timeout_seconds)
-    console.print_json(json.dumps(model.health(), ensure_ascii=False))
-    return 0
+    data = model.health()
+    console.print_json(json.dumps(data, ensure_ascii=False))
+    return 0 if data.get("ok") and data.get("model_present") else 1
 
 
 def cmd_history() -> int:
