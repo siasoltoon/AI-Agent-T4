@@ -15,10 +15,11 @@ class ToolError(RuntimeError):
 class WorkspaceTools:
     """Deterministic tools exposed to the model. Paths are workspace-relative."""
 
-    def __init__(self, workspace: Path, max_command_seconds: int = 600) -> None:
+    def __init__(self, workspace: Path, max_command_seconds: int = 600, max_output_chars: int = 16000) -> None:
         self.workspace = workspace.resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.max_command_seconds = max(1, min(int(max_command_seconds), 600))
+        self.max_output_chars = max(1000, min(int(max_output_chars), 50000))
         self._active_process: subprocess.Popen[str] | None = None
 
     def _path(self, value: str) -> Path:
@@ -51,7 +52,7 @@ class WorkspaceTools:
                 self._terminate_process_tree(process)
                 stdout, stderr = process.communicate(timeout=5)
                 raise subprocess.TimeoutExpired(process.args, seconds, output=stdout, stderr=stderr)
-            return {"ok": process.returncode == 0, "returncode": process.returncode, "stdout": (stdout or "")[-16000:], "stderr": (stderr or "")[-16000:], "cwd": str(self.workspace)}
+            return {"ok": process.returncode == 0, "returncode": process.returncode, "stdout": (stdout or "")[-self.max_output_chars:], "stderr": (stderr or "")[-self.max_output_chars:], "cwd": str(self.workspace)}
         finally:
             if self._active_process is process:
                 self._active_process = None
@@ -84,10 +85,6 @@ class WorkspaceTools:
                 process.wait(timeout=2)
             return
 
-        # Kill descendants explicitly as well as the process group. This is
-        # intentionally redundant: descendants can survive if the shell has
-        # changed process-group/session state, and their inherited pipes would
-        # otherwise keep communicate() blocked after the parent is terminated.
         try:
             import psutil
 
