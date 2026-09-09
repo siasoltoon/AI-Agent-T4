@@ -29,6 +29,7 @@ def runtime() -> AgentExecutor:
         git_remote=SETTINGS.git_remote,
         checkpoint_branch=SETTINGS.checkpoint_branch,
         checkpoint_every_tool=SETTINGS.checkpoint_every_tool,
+        max_context_chars=SETTINGS.max_context_chars,
     )
 
 
