@@ -5,6 +5,21 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+# Fresh Ubuntu images may ship Python without the venv/ensurepip module.
+if ! "$PYTHON_BIN" -m venv --help >/dev/null 2>&1; then
+  echo "[BOOTSTRAP] Installing Python venv support..."
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    if ! apt-get install -y "python$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')-venv"; then
+      apt-get install -y python3-venv
+    fi
+  else
+    echo "[BOOTSTRAP][FAIL] Python venv support is missing and apt-get is unavailable." >&2
+    exit 1
+  fi
+fi
+
 "$PYTHON_BIN" -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
@@ -13,7 +28,16 @@ python -m pip install -e .
 
 if ! command -v ollama >/dev/null 2>&1; then
   echo "[BOOTSTRAP] Installing Ollama..."
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y zstd curl
+  fi
   curl -fsSL https://ollama.com/install.sh | sh
+fi
+
+if ! command -v ollama >/dev/null 2>&1; then
+  echo "[BOOTSTRAP][FAIL] Ollama installation did not provide the ollama command." >&2
+  exit 1
 fi
 
 if ! curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
@@ -29,6 +53,7 @@ if ! curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
   done
   if [[ "$ready" -ne 1 ]]; then
     echo "[BOOTSTRAP][FAIL] Ollama did not become ready within 60 seconds." >&2
+    cat /tmp/ollama.log >&2 || true
     exit 1
   fi
 fi
