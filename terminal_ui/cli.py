@@ -70,9 +70,9 @@ def cmd_run(task: str) -> int:
 def cmd_resume(execution_id: str) -> int:
     state = durable()
     if execution_id == "latest":
-        running = state.list_running()
-        if running:
-            execution_id = str(running[0]["execution_id"])
+        resumable = state.list_resumable()
+        if resumable:
+            execution_id = str(resumable[0]["execution_id"])
         else:
             restored = state.restore_from_remote()
             if not restored.get("ok"):
@@ -96,8 +96,10 @@ def cmd_resume(execution_id: str) -> int:
 def cmd_status() -> int:
     model = OllamaRuntime(SETTINGS.ollama_host, SETTINGS.model_name, SETTINGS.model_timeout_seconds)
     health = model.health()
-    running = durable().list_running()
-    console.print(Panel(f"Workspace: {SETTINGS.workspace_root}\nState: {SETTINGS.state_dir}\nModel: {SETTINGS.model_name}\nOllama: {SETTINGS.ollama_host}\nModel runtime: {health.get('ok')}\nModel present: {health.get('model_present', False)}\nMax steps: {SETTINGS.max_agent_steps}\nMax recovery: {SETTINGS.max_recovery_attempts}\nMax command seconds: {SETTINGS.max_command_seconds}\nCheckpoint branch: {SETTINGS.checkpoint_branch}\nRunning executions: {len(running)}"))
+    state = durable()
+    running = state.list_running()
+    resumable = state.list_resumable()
+    console.print(Panel(f"Workspace: {SETTINGS.workspace_root}\nState: {SETTINGS.state_dir}\nModel: {SETTINGS.model_name}\nOllama: {SETTINGS.ollama_host}\nModel runtime: {health.get('ok')}\nModel present: {health.get('model_present', False)}\nMax steps: {SETTINGS.max_agent_steps}\nMax recovery: {SETTINGS.max_recovery_attempts}\nMax command seconds: {SETTINGS.max_command_seconds}\nCheckpoint branch: {SETTINGS.checkpoint_branch}\nRunning executions: {len(running)}\nResumable executions: {len(resumable)}"))
     return 0 if health.get("ok") and health.get("model_present") else 1
 
 
