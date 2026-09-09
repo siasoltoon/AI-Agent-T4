@@ -7,12 +7,14 @@ Production-oriented, terminal-first autonomous coding agent for ephemeral GPU ru
 ## Core capabilities
 
 - **Real Ollama tool calling** — the model selects tools through `/api/chat`; the runtime executes them and returns observations to the model.
-- **Autonomous loop** — inspect → reason → act → observe → verify → recover, bounded by step, command and recovery budgets.
+- **Autonomous loop** — inspect → reason → act → observe → verify → recover, bounded by step, command, model-retry and recovery budgets.
+- **Model protocol self-recovery** — missing tool calls, malformed tool-call responses and transient model exceptions are retried locally without consuming the main recovery budget.
 - **Deterministic completion gate** — the model must request the `finish` tool; runtime verification is performed before completion is accepted.
 - **Coding tools** — shell, targeted file read/write, pytest, git status and git diff.
 - **Persistent execution state** — atomic JSON checkpoints under `.agent_state/` make runs auditable and resumable at the runtime level.
 - **Remote disaster recovery** — every configured checkpoint can commit execution state and workspace changes to the dedicated `agent-checkpoints` branch; a fresh runtime can fetch and restore the latest or a specific execution when the workspace is clean.
-- **Failure recovery** — failed tool calls feed explicit failure evidence back into the next model turn.
+- **Failure recovery** — failed tool calls feed explicit failure evidence back into the next model turn, which is instructed to diagnose, repair and verify rather than merely retry blindly.
+- **Self-healing Git checkpoints** — fresh runtimes automatically configure a local agent identity when Git author information is missing.
 - **Workspace path controls** — structured file tools reject paths that resolve outside the configured workspace.
 - **Terminal-first UX** — no dashboard or frontend dependency.
 - **GPU-aware deployment** — intended for local Ollama inference with CUDA/T4, while remaining testable without a GPU.
@@ -27,11 +29,11 @@ Production-oriented, terminal-first autonomous coding agent for ephemeral GPU ru
                     │
                     ▼
               AgentExecutor
-          ┌─────────┼─────────┐
-          │         │         │
-       Context    Policy    State
-          │         │         │
-          └─────────┼─────────┘
+          ┌─────────┼────────────┐
+          │         │            │
+       Context    Policy      Recovery
+          │         │            │
+          └─────────┼────────────┘
                     ▼
               OllamaRuntime
                     │
@@ -66,7 +68,7 @@ Default model: `qwen3-coder:30b`.
 
 Default Ollama endpoint: `http://127.0.0.1:11434`.
 
-The runtime does not assume that model text is executable. Tool calls are explicit structured actions. A model response without a tool call cannot declare success.
+The runtime does not assume that model text is executable. Tool calls are explicit structured actions. A model response without a tool call cannot declare success; the runtime retries the model protocol before escalating to normal recovery.
 
 ## Quick start
 
@@ -124,6 +126,7 @@ Copy `.env.example` to `.env` and tune the runtime for the deployment. Important
 - `STATE_DIR`
 - `MAX_AGENT_STEPS`
 - `MAX_RECOVERY_ATTEMPTS`
+- `MAX_MODEL_RETRIES`
 - `MAX_COMMAND_SECONDS`
 - `MODEL_TIMEOUT_SECONDS`
 - `MODEL_TEMPERATURE`
@@ -156,8 +159,10 @@ The agent is intended to operate on a workspace supplied by the operator. Struct
 1. Evidence beats model claims.
 2. Tools beat simulated commands.
 3. Verification is mandatory before completion.
-4. Failures become observations, not silent retries.
-5. Budgets prevent infinite loops.
-6. State is persisted atomically.
-7. Checkpoints make ephemeral runtimes recoverable.
-8. The model proposes actions; deterministic runtime code executes them.
+4. Protocol errors are retried locally before consuming recovery budget.
+5. Failures become observations that drive diagnosis and repair.
+6. Budgets prevent infinite loops.
+7. State is persisted atomically.
+8. Checkpoints make ephemeral runtimes recoverable.
+9. Fresh runtimes self-heal missing Git checkpoint identity.
+10. The model proposes actions; deterministic runtime code executes them.
