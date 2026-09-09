@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
@@ -17,6 +19,7 @@ class WorkspaceTools:
         self.workspace = workspace.resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.max_command_seconds = max(1, min(int(max_command_seconds), 600))
+        self._active_process: subprocess.Popen[str] | None = None
 
     def _path(self, value: str) -> Path:
         raw = Path(str(value or "."))
@@ -29,8 +32,60 @@ class WorkspaceTools:
         if not str(command).strip():
             raise ToolError("Command cannot be empty.")
         seconds = max(1, min(int(timeout), self.max_command_seconds))
-        completed = subprocess.run(["bash", "-lc", str(command)], cwd=self.workspace, text=True, capture_output=True, timeout=seconds)
-        return {"ok": completed.returncode == 0, "returncode": completed.returncode, "stdout": completed.stdout[-16000:], "stderr": completed.stderr[-16000:], "cwd": str(self.workspace)}
+        kwargs: dict[str, Any] = {
+            "cwd": self.workspace,
+            "text": True,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        process = subprocess.Popen(["bash", "-lc", str(command)], **kwargs)
+        self._active_process = process
+        try:
+            try:
+                stdout, stderr = process.communicate(timeout=seconds)
+            except subprocess.TimeoutExpired:
+                self._terminate_process_group(process)
+                stdout, stderr = process.communicate(timeout=5)
+                raise subprocess.TimeoutExpired(process.args, seconds, output=stdout, stderr=stderr)
+            return {"ok": process.returncode == 0, "returncode": process.returncode, "stdout": (stdout or "")[-16000:], "stderr": (stderr or "")[-16000:], "cwd": str(self.workspace)}
+        finally:
+            if self._active_process is process:
+                self._active_process = None
+
+    def interrupt_active_process(self) -> bool:
+        """Terminate the currently running shell tool, if any."""
+        process = self._active_process
+        if process is None or process.poll() is not None:
+            return False
+        self._terminate_process_group(process)
+        return True
+
+    @staticmethod
+    def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            if os.name == "nt":
+                process.terminate()
+            else:
+                os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                if os.name == "nt":
+                    process.kill()
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                return
+            process.wait(timeout=2)
 
     def read_file(self, path: str, max_chars: int = 30000) -> dict[str, Any]:
         target = self._path(path)
