@@ -77,7 +77,9 @@ def test_executor_recovers_from_model_exception_before_tool_execution(tmp_path: 
             self.calls += 1
             if self.calls == 1:
                 raise TimeoutError("temporary model timeout")
-            return tool_call("finish", {"summary": "Verified no-op task."}, "call-finish")
+            if self.calls == 2:
+                return tool_call("shell", {"command": "true"}, "call-shell")
+            return tool_call("finish", {"summary": "Verified workspace."}, "call-finish")
 
     result = AgentExecutor(
         FlakyModel(),
