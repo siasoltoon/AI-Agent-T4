@@ -40,6 +40,7 @@ def git(path: Path, *args: str, check: bool = True) -> subprocess.CompletedProce
 
 
 def init_repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
     git(path, "init")
     git(path, "config", "user.email", "agent-test@example.invalid")
     git(path, "config", "user.name", "Agent Test")
