@@ -45,7 +45,7 @@ class AgentExecutor:
         self._interrupted = False
 
     def _snapshot(self, execution_id: str, status: str, task: str, messages: list[dict[str, Any]], history: list[dict[str, Any]], step: int, recovery: int, summary: str = "") -> None:
-        self.state.save(execution_id, {"execution_id": execution_id, "status": status, "task": task, "messages": messages, "history": history[-100:], "steps": step, "recovery_attempts": recovery, "summary": summary, "workspace": str(self.workspace)})
+        self.state.save(execution_id, {"execution_id": execution_id, "status": status, "task": task, "messages": messages, "history": history[-100:], "steps": step, "recovery_attempts": recovery, "summary": summary, "workspace": str(self.workspace), "updated_at": datetime.now(timezone.utc).isoformat()})
 
     def _verify(self, task: str, history: list[dict[str, Any]]) -> dict[str, Any]:
         checks: list[dict[str, Any]] = []
@@ -63,7 +63,7 @@ class AgentExecutor:
         if not verification["passed"]:
             return None
         result = ExecutionResult(execution_id, "completed", summary, step, recovery, verification["checks"])
-        self.state.save(execution_id, {**result.__dict__, "task": task, "messages": messages, "history": history, "workspace": str(self.workspace)})
+        self.state.save(execution_id, {**result.__dict__, "task": task, "messages": messages, "history": history, "workspace": str(self.workspace), "updated_at": datetime.now(timezone.utc).isoformat()})
         self.state.checkpoint_git(execution_id, "completed")
         self.emit("completed", {"summary": summary, "execution_id": execution_id})
         return result
@@ -124,7 +124,7 @@ class AgentExecutor:
                         break
                     if recovery >= self.max_recovery:
                         result = ExecutionResult(execution_id, "failed", str(exc), step, recovery, history)
-                        self.state.save(execution_id, {**result.__dict__, "task": task, "messages": messages, "history": history, "workspace": str(self.workspace)})
+                        self.state.save(execution_id, {**result.__dict__, "task": task, "messages": messages, "history": history, "workspace": str(self.workspace), "updated_at": datetime.now(timezone.utc).isoformat()})
                         self.state.checkpoint_git(execution_id, "failed")
                         self.emit("failed", {"error": str(exc), "execution_id": execution_id})
                         return result
@@ -137,7 +137,7 @@ class AgentExecutor:
             return ExecutionResult(execution_id, "interrupted", "Execution interrupted and durably checkpointed.", current_step, recovery, history)
         message = f"Maximum agent steps ({self.max_steps}) reached without verified completion."
         result = ExecutionResult(execution_id, "failed", message, self.max_steps, recovery, history)
-        self.state.save(execution_id, {**result.__dict__, "task": task, "messages": messages, "history": history, "workspace": str(self.workspace)})
+        self.state.save(execution_id, {**result.__dict__, "task": task, "messages": messages, "history": history, "workspace": str(self.workspace), "updated_at": datetime.now(timezone.utc).isoformat()})
         self.state.checkpoint_git(execution_id, "max-steps")
         self.emit("failed", {"error": message, "execution_id": execution_id})
         return result
