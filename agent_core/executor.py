@@ -9,7 +9,6 @@ from typing import Any, Callable
 
 from agent_core.durability import DurableState, InterruptGuard
 from agent_core.tools import TOOL_SCHEMAS, WorkspaceTools, dispatch, tool_result_message
-from linux_runtime.shell import LinuxShell
 
 SYSTEM_PROMPT = """You are a production-grade autonomous software engineering agent.
 Operate by inspect -> reason -> act -> observe -> verify -> recover. Never claim completion from intention.
@@ -36,22 +35,17 @@ class AgentExecutor:
         self.model = model
         self.workspace = workspace.resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
-        self.shell = LinuxShell(self.workspace, max_seconds=max_command_seconds)
         self.tools = WorkspaceTools(self.workspace, max_command_seconds=max_command_seconds)
         self.max_steps = max(1, min(int(max_steps), 128))
         self.max_recovery = max(0, min(int(max_recovery), 12))
         self.temperature = max(0.0, min(float(temperature), 1.0))
         self.emit = emit or (lambda _event, _data: None)
-        self.state = DurableState((state_dir or (self.workspace / ".agent_state")), self.workspace, auto_git_checkpoint, git_remote, checkpoint_branch)
+        self.state = DurableState(state_dir or (self.workspace / ".agent_state"), self.workspace, auto_git_checkpoint, git_remote, checkpoint_branch)
         self.checkpoint_every_tool = checkpoint_every_tool
         self._interrupted = False
 
-    def _persist(self, execution_id: str, payload: dict[str, Any]) -> None:
-        payload["updated_at"] = datetime.now(timezone.utc).isoformat()
-        self.state.save(execution_id, payload)
-
     def _snapshot(self, execution_id: str, status: str, task: str, messages: list[dict[str, Any]], history: list[dict[str, Any]], step: int, recovery: int, summary: str = "") -> None:
-        self._persist(execution_id, {"execution_id": execution_id, "status": status, "task": task, "messages": messages, "history": history[-100:], "steps": step, "recovery_attempts": recovery, "summary": summary, "workspace": str(self.workspace)})
+        self.state.save(execution_id, {"execution_id": execution_id, "status": status, "task": task, "messages": messages, "history": history[-100:], "steps": step, "recovery_attempts": recovery, "summary": summary, "workspace": str(self.workspace)})
 
     def _verify(self, task: str, history: list[dict[str, Any]]) -> dict[str, Any]:
         checks: list[dict[str, Any]] = []
@@ -69,7 +63,7 @@ class AgentExecutor:
         if not verification["passed"]:
             return None
         result = ExecutionResult(execution_id, "completed", summary, step, recovery, verification["checks"])
-        self._persist(execution_id, {**result.__dict__, "task": task, "messages": messages, "history": history, "workspace": str(self.workspace)})
+        self.state.save(execution_id, {**result.__dict__, "task": task, "messages": messages, "history": history, "workspace": str(self.workspace)})
         self.state.checkpoint_git(execution_id, "completed")
         self.emit("completed", {"summary": summary, "execution_id": execution_id})
         return result
@@ -80,23 +74,12 @@ class AgentExecutor:
         self.state.checkpoint_git(execution_id, "interrupted")
         self.emit("interrupted", {"execution_id": execution_id, "signal": signum})
 
-    def resume(self, execution_id: str) -> ExecutionResult:
-        data = self.state.load(execution_id)
-        if data.get("status") == "completed":
-            return ExecutionResult(execution_id, "completed", str(data.get("summary", "Already completed.")), int(data.get("steps", 0)), int(data.get("recovery_attempts", 0)), list(data.get("evidence", [])))
-        task = str(data["task"])
-        messages = list(data.get("messages") or [])
-        history = list(data.get("history") or [])
-        start_step = int(data.get("steps", 0))
-        recovery = int(data.get("recovery_attempts", 0))
-        self._interrupted = False
-        return self._run_loop(execution_id, task, messages, history, start_step, recovery)
-
     def _run_loop(self, execution_id: str, task: str, messages: list[dict[str, Any]], history: list[dict[str, Any]], start_step: int, recovery: int) -> ExecutionResult:
+        current_step = start_step
+
         def on_interrupt(signum: int) -> None:
             self._interrupt(execution_id, task, messages, history, current_step, recovery, signum)
 
-        current_step = start_step
         with InterruptGuard(on_interrupt):
             for step in range(start_step + 1, self.max_steps + 1):
                 current_step = step
@@ -104,43 +87,41 @@ class AgentExecutor:
                 try:
                     if self._interrupted:
                         break
-                    if hasattr(self.model, "chat"):
-                        response = self.model.chat(messages, tools=TOOL_SCHEMAS, temperature=self.temperature)
-                        message = response.get("message") or {}
-                        tool_calls = message.get("tool_calls") or []
-                        messages.append(message)
-                        if not tool_calls:
-                            raise RuntimeError("Model stopped without a tool call; completion requires the finish tool.")
-                        for call in tool_calls:
-                            fn = call.get("function") or {}
-                            name = str(fn.get("name") or "")
-                            arguments = fn.get("arguments") or {}
-                            if isinstance(arguments, str): arguments = json.loads(arguments)
-                            self.emit("tool", {"tool": name, "command": arguments.get("command", name)})
-                            result = dispatch(self.tools, name, arguments)
-                            record = {"step": step, "tool": name, "arguments": arguments, "ok": result.get("ok", True), "result": result}
-                            history.append(record)
-                            self.emit("observation", {"tool": name, "stdout": result.get("stdout", ""), "stderr": result.get("stderr", "")})
-                            if name == "finish" and result.get("finish_request"):
-                                completed = self._finish(execution_id, task, history, messages, step, recovery, result.get("summary", "Task completed and verified."))
-                                if completed is not None: return completed
-                                raise RuntimeError("Finish request rejected because deterministic verification failed.")
-                            messages.append(tool_result_message(str(call.get("id") or uuid.uuid4().hex), result, name))
-                            self._snapshot(execution_id, "running", task, messages, history, step, recovery)
-                            if self.checkpoint_every_tool:
-                                checkpoint = self.state.checkpoint_git(execution_id, f"step-{step}-{name}")
-                                if not checkpoint.get("ok") and not checkpoint.get("skipped"):
-                                    self.emit("checkpoint_warning", checkpoint)
-                            if result.get("ok") is False:
-                                raise RuntimeError(f"Tool {name} failed: {result.get('stderr') or result.get('error') or 'unknown error'}")
-                    else:
-                        raise RuntimeError("Legacy text-only model runtime is not supported by the autonomous v2 executor.")
+                    response = self.model.chat(messages, tools=TOOL_SCHEMAS, temperature=self.temperature)
+                    message = response.get("message") or {}
+                    tool_calls = message.get("tool_calls") or []
+                    messages.append(message)
+                    if not tool_calls:
+                        raise RuntimeError("Model stopped without a tool call; completion requires the finish tool.")
+                    for call in tool_calls:
+                        fn = call.get("function") or {}
+                        name = str(fn.get("name") or "")
+                        arguments = fn.get("arguments") or {}
+                        if isinstance(arguments, str): arguments = json.loads(arguments)
+                        self.emit("tool", {"tool": name, "command": arguments.get("command", name)})
+                        result = dispatch(self.tools, name, arguments)
+                        record = {"step": step, "tool": name, "arguments": arguments, "ok": result.get("ok", True), "result": result}
+                        history.append(record)
+                        self.emit("observation", {"tool": name, "stdout": result.get("stdout", ""), "stderr": result.get("stderr", "")})
+                        if name == "finish" and result.get("finish_request"):
+                            completed = self._finish(execution_id, task, history, messages, step, recovery, result.get("summary", "Task completed and verified."))
+                            if completed is not None:
+                                return completed
+                            raise RuntimeError("Finish request rejected because deterministic verification failed.")
+                        messages.append(tool_result_message(str(call.get("id") or uuid.uuid4().hex), result, name))
+                        self._snapshot(execution_id, "running", task, messages, history, step, recovery)
+                        if self.checkpoint_every_tool:
+                            checkpoint = self.state.checkpoint_git(execution_id, f"step-{step}-{name}")
+                            if not checkpoint.get("ok") and not checkpoint.get("skipped"):
+                                self.emit("checkpoint_warning", checkpoint)
+                        if result.get("ok") is False:
+                            raise RuntimeError(f"Tool {name} failed: {result.get('stderr') or result.get('error') or 'unknown error'}")
                 except Exception as exc:
                     if self._interrupted:
                         break
                     if recovery >= self.max_recovery:
                         result = ExecutionResult(execution_id, "failed", str(exc), step, recovery, history)
-                        self._persist(execution_id, {**result.__dict__, "task": task, "messages": messages, "history": history, "workspace": str(self.workspace)})
+                        self.state.save(execution_id, {**result.__dict__, "task": task, "messages": messages, "history": history, "workspace": str(self.workspace)})
                         self.state.checkpoint_git(execution_id, "failed")
                         self.emit("failed", {"error": str(exc), "execution_id": execution_id})
                         return result
@@ -153,15 +134,22 @@ class AgentExecutor:
             return ExecutionResult(execution_id, "interrupted", "Execution interrupted and durably checkpointed.", current_step, recovery, history)
         message = f"Maximum agent steps ({self.max_steps}) reached without verified completion."
         result = ExecutionResult(execution_id, "failed", message, self.max_steps, recovery, history)
-        self._persist(execution_id, {**result.__dict__, "task": task, "messages": messages, "history": history, "workspace": str(self.workspace)})
+        self.state.save(execution_id, {**result.__dict__, "task": task, "messages": messages, "history": history, "workspace": str(self.workspace)})
         self.state.checkpoint_git(execution_id, "max-steps")
         self.emit("failed", {"error": message, "execution_id": execution_id})
         return result
 
     def run(self, task: str) -> ExecutionResult:
         execution_id = f"exec_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
-        messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": f"Workspace: {self.workspace}\nTask: {task}"}]
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": f"Workspace: {self.workspace}\nTask: {task}"}]
         self.emit("start", {"execution_id": execution_id, "task": task})
         self.emit("planning", {"message": "Planning and executing autonomously..."})
         self._snapshot(execution_id, "running", task, messages, [], 0, 0)
-        return self._run_loop(execution_id, task, [], 0, 0)
+        return self._run_loop(execution_id, task, messages, [], 0, 0)
+
+    def resume(self, execution_id: str) -> ExecutionResult:
+        data = self.state.load(execution_id)
+        if data.get("status") == "completed":
+            return ExecutionResult(execution_id, "completed", str(data.get("summary", "Already completed.")), int(data.get("steps", 0)), int(data.get("recovery_attempts", 0)), list(data.get("evidence", [])))
+        self._interrupted = False
+        return self._run_loop(execution_id, str(data["task"]), list(data.get("messages") or []), list(data.get("history") or []), int(data.get("steps", 0)), int(data.get("recovery_attempts", 0)))
