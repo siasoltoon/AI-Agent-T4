@@ -80,3 +80,20 @@ def test_tool_output_is_bounded(tmp_path: Path):
     result = tools.shell("python -c \"print('x' * 20000)\"")
     assert result["ok"] is True
     assert len(result["stdout"]) <= 16000
+
+
+def test_model_context_is_bounded_and_preserves_system_and_task(tmp_path: Path):
+    init_git(tmp_path)
+    executor = AgentExecutor(FakeModel([]), tmp_path, auto_git_checkpoint=False, max_context_chars=4000)
+    messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "TASK"},
+    ]
+    for index in range(20):
+        messages.append({"role": "assistant", "content": f"assistant-{index}"})
+        messages.append({"role": "tool", "tool_call_id": f"call-{index}", "content": "x" * 500})
+    bounded = executor._model_messages(messages)
+    assert bounded[0]["content"] == "SYSTEM"
+    assert bounded[1]["content"] == "TASK"
+    assert len(__import__("json").dumps(bounded, ensure_ascii=False, separators=(",", ":"))) <= 4000
+    assert all(item.get("role") != "tool" or index > 1 for index, item in enumerate(bounded))
