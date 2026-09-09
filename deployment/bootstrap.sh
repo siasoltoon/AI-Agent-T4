@@ -11,7 +11,8 @@ if ! "$PYTHON_BIN" -m venv --help >/dev/null 2>&1; then
   echo "[BOOTSTRAP] Installing Python venv support..."
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update
-    if ! apt-get install -y "python$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')-venv"; then
+    PYTHON_VERSION="$($PYTHON_BIN -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    if ! apt-get install -y "python${PYTHON_VERSION}-venv"; then
       apt-get install -y python3-venv
     fi
   else
@@ -70,7 +71,6 @@ python -m pytest -q
 echo ""
 echo "[RECOVERY] Checking for an interrupted/running execution..."
 agent recover
-
 echo ""
 echo "[READY] AI-Agent-T4 is ready."
 echo "[READY] Try: agent status"
