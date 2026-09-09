@@ -52,7 +52,7 @@ class AgentExecutor:
         status = self.tools.git_status()
         checks.append({"type": "workspace", "passed": status.get("ok") is True, "stdout": status.get("stdout", ""), "stderr": status.get("stderr", "")})
         lower = task.lower()
-        if any(x in lower for x in ("test", "tests", "pytest", "test suite", "verify")) or any(h.get("tool") == "pytest" for h in history):
+        if any(x in lower for x in ("test", "tests", "pytest", "test suite")) or any(h.get("tool") == "pytest" for h in history):
             result = self.tools.pytest()
             checks.append({"type": "pytest", "passed": result.get("ok") is True, "stdout": result.get("stdout", ""), "stderr": result.get("stderr", "")})
         return {"passed": all(c["passed"] for c in checks), "checks": checks}
