@@ -71,6 +71,7 @@ class AgentExecutor:
     def _interrupt(self, execution_id: str, task: str, messages: list[dict[str, Any]], history: list[dict[str, Any]], step: int, recovery: int, signum: int) -> None:
         self._interrupted = True
         self._snapshot(execution_id, "interrupted", task, messages, history, step, recovery, "Execution interrupted; resume with `agent resume %s`." % execution_id)
+        self.tools.interrupt_active_process()
         self.state.checkpoint_git(execution_id, "interrupted")
         self.emit("interrupted", {"execution_id": execution_id, "signal": signum})
 
