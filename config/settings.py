@@ -23,6 +23,13 @@ def _float(name: str, default: float, minimum: float, maximum: float) -> float:
         return default
 
 
+def _bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     model_name: str = os.getenv("MODEL_NAME", "qwen3-coder:30b")
@@ -36,6 +43,10 @@ class Settings:
     model_temperature: float = _float("MODEL_TEMPERATURE", 0.1, 0.0, 1.0)
     max_context_chars: int = _int("MAX_CONTEXT_CHARS", 48000, 4000, 120000)
     max_output_chars: int = _int("MAX_TOOL_OUTPUT_CHARS", 16000, 1000, 50000)
+    auto_git_checkpoint: bool = _bool("AUTO_GIT_CHECKPOINT", True)
+    git_remote: str = os.getenv("GIT_REMOTE", "origin")
+    checkpoint_branch: str = os.getenv("CHECKPOINT_BRANCH", "agent-checkpoints")
+    checkpoint_every_tool: bool = _bool("CHECKPOINT_EVERY_TOOL", True)
 
 
 SETTINGS = Settings()
