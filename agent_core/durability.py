@@ -50,38 +50,75 @@ class DurableState:
                 continue
         return sorted(items, key=lambda x: x.get("updated_at", ""), reverse=True)
 
+    def _git(self, *args: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", *args], cwd=self.workspace, text=True, capture_output=True, timeout=timeout)
+
     def checkpoint_git(self, execution_id: str, reason: str) -> dict[str, Any]:
         if not self.auto_git:
             return {"ok": False, "skipped": True, "reason": "disabled"}
-
-        def run(*args: str, check_timeout: int = 60) -> subprocess.CompletedProcess[str]:
-            return subprocess.run(list(args), cwd=self.workspace, text=True, capture_output=True, timeout=check_timeout)
-
         try:
-            if run("git", "rev-parse", "--is-inside-work-tree").returncode != 0:
+            if self._git("rev-parse", "--is-inside-work-tree").returncode != 0:
                 return {"ok": False, "error": "workspace is not a git repository"}
-            branch = run("git", "branch", "--show-current").stdout.strip()
+            branch = self._git("branch", "--show-current").stdout.strip()
             if not branch:
                 return {"ok": False, "error": "detached HEAD; refusing automatic checkpoint"}
-            add = run("git", "add", "-A")
+            add = self._git("add", "-A")
             if add.returncode != 0:
                 return {"ok": False, "error": add.stderr[-4000:]}
             # State is intentionally ignored during normal development, but execution state is part of the disaster-recovery record.
             state_path = self.state_dir / f"{execution_id}.json"
             if state_path.exists() and self.workspace in state_path.parents:
-                force = run("git", "add", "-f", str(state_path.relative_to(self.workspace)))
+                force = self._git("add", "-f", str(state_path.relative_to(self.workspace)))
                 if force.returncode != 0:
                     return {"ok": False, "error": force.stderr[-4000:]}
-            diff = run("git", "diff", "--cached", "--quiet")
+            diff = self._git("diff", "--cached", "--quiet")
             if diff.returncode == 0:
                 return {"ok": True, "changed": False, "branch": branch}
-            commit = run("git", "commit", "-m", f"agent checkpoint: {execution_id} ({reason})", check_timeout=120)
+            commit = self._git("commit", "-m", f"agent checkpoint: {execution_id} ({reason})", timeout=120)
             if commit.returncode != 0:
                 return {"ok": False, "error": commit.stderr[-4000:]}
-            push = run("git", "push", self.remote, f"HEAD:{self.branch}", check_timeout=120)
+            push = self._git("push", self.remote, f"HEAD:{self.branch}", timeout=120)
             if push.returncode != 0:
                 return {"ok": False, "committed": True, "pushed": False, "error": push.stderr[-4000:]}
             return {"ok": True, "changed": True, "pushed": True, "branch": self.branch}
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def restore_from_remote(self, execution_id: str | None = None) -> dict[str, Any]:
+        """Restore a clean workspace from the latest or requested remote checkpoint."""
+        try:
+            if self._git("rev-parse", "--is-inside-work-tree").returncode != 0:
+                return {"ok": False, "error": "workspace is not a git repository"}
+            status = self._git("status", "--porcelain").stdout.strip()
+            if status:
+                return {"ok": False, "error": "workspace is not clean; refusing destructive checkpoint restore"}
+            fetch = self._git("fetch", self.remote, self.branch, timeout=120)
+            if fetch.returncode != 0:
+                return {"ok": False, "error": fetch.stderr[-4000:] or "git fetch failed"}
+            remote_ref = f"{self.remote}/{self.branch}"
+            if self._git("rev-parse", "--verify", remote_ref).returncode != 0:
+                return {"ok": False, "error": f"checkpoint branch not found: {remote_ref}"}
+            if execution_id:
+                pattern = f".agent_state/{execution_id}.json"
+                commit = self._git("log", "-1", "--format=%H", remote_ref, "--", pattern).stdout.strip()
+                if not commit:
+                    return {"ok": False, "error": f"remote execution not found: {execution_id}"}
+            else:
+                commit = self._git("log", "-1", "--format=%H", remote_ref, "--", ".agent_state").stdout.strip()
+                if not commit:
+                    return {"ok": False, "error": "no remote execution state found"}
+                execution_id = self._git("show", f"{commit}:.agent_state", timeout=60).stderr.strip() if False else None
+                names = self._git("ls-tree", "-r", "--name-only", commit, ".agent_state").stdout.splitlines()
+                state_names = [n for n in names if n.startswith(".agent_state/exec_") and n.endswith(".json")]
+                if not state_names:
+                    return {"ok": False, "error": "remote checkpoint contains no execution state"}
+                latest_name = state_names[-1]
+                execution_id = Path(latest_name).stem
+                commit = self._git("log", "-1", "--format=%H", remote_ref, "--", latest_name).stdout.strip() or commit
+            reset = self._git("reset", "--hard", commit, timeout=120)
+            if reset.returncode != 0:
+                return {"ok": False, "error": reset.stderr[-4000:] or "git reset failed"}
+            return {"ok": True, "execution_id": execution_id, "commit": commit, "branch": self.branch}
         except (OSError, subprocess.TimeoutExpired) as exc:
             return {"ok": False, "error": str(exc)}
 
