@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from linux_runtime.shell import LinuxShell
-from model_runtime.ollama import ModelRuntimeError, OllamaRuntime
+from model_runtime.ollama import OllamaRuntime
 
 SYSTEM_PROMPT = '''You are an autonomous software agent running in a Linux terminal workspace.
 You must act, observe, and verify. Never claim a task is complete merely because you proposed a solution.
@@ -34,13 +34,14 @@ class ExecutionResult:
 
 
 class AgentExecutor:
-    def __init__(self, model: OllamaRuntime, workspace: Path, max_steps: int = 32, max_recovery: int = 6, emit: Callable[[str, dict[str, Any]], None] | None = None) -> None:
+    def __init__(self, model: OllamaRuntime, workspace: Path, max_steps: int = 32, max_recovery: int = 6, max_command_seconds: int = 600, temperature: float = 0.1, emit: Callable[[str, dict[str, Any]], None] | None = None) -> None:
         self.model = model
         self.workspace = workspace.resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
-        self.shell = LinuxShell(self.workspace)
+        self.shell = LinuxShell(self.workspace, max_seconds=max_command_seconds)
         self.max_steps = max(1, min(max_steps, 64))
         self.max_recovery = max(0, min(max_recovery, 6))
+        self.temperature = max(0.0, min(float(temperature), 2.0))
         self.emit = emit or (lambda _event, _data: None)
 
     @staticmethod
@@ -89,7 +90,7 @@ class AgentExecutor:
         for step in range(1, self.max_steps + 1):
             self.emit("step", {"number": step, "max": self.max_steps})
             try:
-                decision = self._json(self.model.generate(self._context(task, history), system=SYSTEM_PROMPT))
+                decision = self._json(self.model.generate(self._context(task, history), system=SYSTEM_PROMPT, temperature=self.temperature))
                 action = str(decision.get("action", "")).lower()
                 if action == "finish":
                     verification = self._verify(task, history)
